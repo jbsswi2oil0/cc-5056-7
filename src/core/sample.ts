@@ -1,14 +1,17 @@
 import type {
+  ColorConvention,
   IntervalSample,
   LegacySegmentSample,
   PointSample,
   Rgb,
   Rgba,
   Sample,
+  SampleChain,
   SampleIssue,
   SampleIssueCode,
 } from './types';
 import { SampleError } from './types';
+import { findMixedConvention, resolveConvention } from './convention';
 
 export const DEFAULT_TOLERANCE = 1e-7;
 export const MAX_TIE_GROUP = 8;
@@ -89,19 +92,42 @@ export interface SanitizedChain {
   issues: SampleIssue[];
   dropped: number;
   nonFinite: number;
+  /** Surface samples converted from straight to premultiplied at read time. */
+  straightConverted: number;
+  /** True when the input mixed premultiplied and straight surface color. */
+  mixedConvention: boolean;
   /** Original input position of each kept sample, for stable-order ties. */
   ordinal: Map<Sample, number>;
 }
+
+export type ColorPolicy = 'convert-at-read' | 'reject';
 
 /**
  * Validate a chain and split it into media, point, and legacy lists. Invalid
  * fields are dropped, never propagated; every removal is reported so the UI can
  * surface anomalies instead of silently changing the image.
  *
+ * Color conventions are resolved here, at the read boundary: straight surface
+ * color is premultiplied once (or rejected), and a chain that mixes the two
+ * conventions is isolated with SampleError instead of being blended.
+ *
  * The result is sorted into a canonical order so that floating-point
  * accumulation is independent of the caller's array order.
  */
-export function sanitizeChain(samples: Sample[], tol = DEFAULT_TOLERANCE): SanitizedChain {
+export function sanitizeChain(
+  samples: Sample[],
+  tol: number = DEFAULT_TOLERANCE,
+  colorPolicy: ColorPolicy = 'convert-at-read',
+): SanitizedChain {
+  const mixed = findMixedConvention({ samples });
+  if (mixed.mixed) {
+    throw new SampleError(
+      `chain mixes premultiplied and straight color on samples ${mixed.ids.join(', ')}; conventions must be isolated`,
+      'MIXED_COLOR_CONVENTION',
+      { sampleIds: mixed.ids },
+    );
+  }
+
   const media: IntervalSample[] = [];
   const points: PointSample[] = [];
   const legacy: LegacySegmentSample[] = [];
@@ -109,6 +135,7 @@ export function sanitizeChain(samples: Sample[], tol = DEFAULT_TOLERANCE): Sanit
   const ordinal = new Map<Sample, number>();
   let dropped = 0;
   let nonFinite = 0;
+  let straightConverted = 0;
   const idCounts = new Map<string, number>();
 
   const drop = (code: SampleIssueCode, message: string, id?: string) => {
@@ -116,11 +143,26 @@ export function sanitizeChain(samples: Sample[], tol = DEFAULT_TOLERANCE): Sanit
     issue(issues, code, message, id ? [id] : undefined);
   };
 
-  samples.forEach((s, index) => {
-    if (!s || typeof s !== 'object' || typeof (s as Sample).kind !== 'string') {
+  samples.forEach((raw, index) => {
+    if (!raw || typeof raw !== 'object' || typeof (raw as Sample).kind !== 'string') {
       nonFinite++;
       drop('unknown-kind', `sample #${index} is not a recognized sample`);
       return;
+    }
+    let s: Sample = raw;
+    // Resolve the color convention before validation reads rgb, so a straight
+    // sample is never measured against premultiplied invariants.
+    if (s.kind === 'point' || s.kind === 'legacy-segment') {
+      const resolved = resolveConvention(s, colorPolicy);
+      if (resolved.converted) {
+        straightConverted++;
+        issues.push({
+          code: 'straight-converted',
+          message: `sample "${s.id}" read as straight color and premultiplied at load`,
+          sampleIds: [s.id],
+        });
+      }
+      s = resolved.sample;
     }
     const id = String((s as { id?: unknown }).id ?? `#${index}`);
     idCounts.set(id, (idCounts.get(id) ?? 0) + 1);
@@ -139,7 +181,7 @@ export function sanitizeChain(samples: Sample[], tol = DEFAULT_TOLERANCE): Sanit
       if (!sameRgba(color, s.color)) {
         issue(issues, 'sanitized', `point ${id} clamped to non-negative premultiplied color`, [id]);
       }
-      const point = { ...s, id, color };
+      const point = { ...s, id, color, colorConvention: 'premultiplied' as ColorConvention };
       ordinal.set(point, index);
       points.push(point);
       return;
@@ -204,7 +246,7 @@ export function sanitizeChain(samples: Sample[], tol = DEFAULT_TOLERANCE): Sanit
       if (!sameRgba(accumulated, s.accumulated)) {
         issue(issues, 'sanitized', `legacy segment ${id} clamped to non-negative color`, [id]);
       }
-      const segment = { ...s, id, accumulated };
+      const segment = { ...s, id, accumulated, colorConvention: 'premultiplied' as ColorConvention };
       ordinal.set(segment, index);
       legacy.push(segment);
       return;
@@ -223,7 +265,17 @@ export function sanitizeChain(samples: Sample[], tol = DEFAULT_TOLERANCE): Sanit
   media.sort(compareMedia);
   legacy.sort(compareLegacy);
   // Points keep input order: the stable-order tie policy is defined on it.
-  return { media, points, legacy, issues, dropped, nonFinite, ordinal };
+  return {
+    media,
+    points,
+    legacy,
+    issues,
+    dropped,
+    nonFinite,
+    straightConverted,
+    mixedConvention: mixed.mixed,
+    ordinal,
+  };
 }
 
 export function compareMedia(a: IntervalSample, b: IntervalSample): number {

@@ -22,6 +22,16 @@ export interface Rgba extends Rgb {
 
 export type LayerId = string;
 
+/**
+ * Color convention carried by a surface sample.
+ * - 'premultiplied': rgb already holds color*coverage; the integrator applies
+ *   it directly with the over operator. This is the only internal convention.
+ * - 'straight': rgb is unassociated linear color and `a` is coverage. A reader
+ *   must convert it to premultiplied before integration; a chain that mixes the
+ *   two conventions is invalid and must be isolated rather than blended.
+ */
+export type ColorConvention = 'premultiplied' | 'straight';
+
 export interface PointSample {
   kind: 'point';
   /** Stable identity; canonical ordering tie-breaker and diagnostics. */
@@ -29,8 +39,13 @@ export interface PointSample {
   layer?: LayerId;
   /** Depth in scene units. Must be finite. */
   z: number;
-  /** Premultiplied linear color; the alpha channel is coverage. */
+  /**
+   * Linear color; the alpha channel is coverage in [0,1]. Interpretation of rgb
+   * follows `colorConvention` (default premultiplied).
+   */
   color: Rgba;
+  /** Whether `color.rgb` is premultiplied or straight. Default premultiplied. */
+  colorConvention?: ColorConvention;
   /** Provenance for assets that originate outside this app. */
   provenance?: 'segmented' | 'supplemented' | 'derived' | 'legacy';
 }
@@ -61,8 +76,10 @@ export interface LegacySegmentSample {
   layer?: LayerId;
   zNear: number;
   zFar: number;
-  /** Whole-segment accumulated premultiplied color. */
+  /** Whole-segment accumulated color; convention follows colorConvention. */
   accumulated: Rgba;
+  /** Whether `accumulated.rgb` is premultiplied or straight. */
+  colorConvention?: ColorConvention;
   provenance: 'legacy-accumulated';
 }
 
@@ -87,6 +104,16 @@ export interface CompositeOptions {
   allowApproximateLegacy?: boolean;
   /** Collect the ordered event chain for inspection. Default false. */
   collectEvents?: boolean;
+  /**
+   * How to treat surface samples whose colorConvention is 'straight'.
+   * - 'convert-at-read' (default): premultiply once during sanitization, then
+   *   run the ordinary premultiplied integrator. Recorded as a sanitization.
+   * - 'reject': throw SampleError(STRAIGHT_COLOR_NOT_ISOLATED) so a caller that
+   *   wants to handle conversion at its own integration node can do so.
+   * A chain that mixes premultiplied and straight inputs is always isolated:
+   * the whole chain is rejected rather than silently blending conventions.
+   */
+  colorPolicy?: 'convert-at-read' | 'reject';
 }
 
 export type SampleIssueCode =
@@ -101,7 +128,10 @@ export type SampleIssueCode =
   | 'legacy-exact'
   | 'overlap'
   | 'tie'
-  | 'large-tie-group';
+  | 'large-tie-group'
+  | 'straight-converted'
+  | 'mixed-color-convention'
+  | 'non-mergeable-tie';
 
 export interface SampleIssue {
   code: SampleIssueCode;
@@ -161,6 +191,15 @@ export interface IntegrationReport {
   nonFinite: number;
   /** Number of coincident-depth groups with more than one sample. */
   ties: number;
+  /**
+   * Coincident groups that cannot be reduced to a single event: the reader may
+   * keep them as an ordered sequence, but it must not claim they merged.
+   */
+  nonMergeableTies: number;
+  /** Surface samples read in straight color and converted at read time. */
+  straightConverted: number;
+  /** True when at least one input chain mixed premultiplied with straight. */
+  mixedConvention: boolean;
   issues: SampleIssue[];
   /** True if the result is exact for the given asset. */
   exact: boolean;

@@ -26,6 +26,7 @@ import type {
  *   kind       u8       0=point, 1=interval, 2=legacy-segment
  *   layerIndex u8       255 = none
  *   provenance u8       0=segmented, 1=supplemented, 2=derived, 3=legacy
+ *   colorConv  u8       0=premultiplied (default), 1=straight (surface only)
  *   idLen      u16
  *   id         utf8
  *   payload    depends on kind:
@@ -34,7 +35,12 @@ import type {
  *     legacy    f32 zNear,zFar, f32 r,g,b,a
  *
  * Float32 storage is deliberate: assets are delivery, not the in-memory working
- * set. Round-trip tolerance is documented in tests.
+ * set. Round-trip tolerance is documented in tests. A colorConv byte is present
+ * in every sample so the layout is fixed-width in the header fields; interval
+ * samples always write 0 because media coefficients carry no alpha convention.
+ * Files written before this byte existed cannot be distinguished by header, so
+ * the version stays 1 and readers treat an absent/default byte as premultiplied,
+ * which every previously written asset used.
  */
 
 export const DSC_MAGIC = 'DSC1';
@@ -65,6 +71,13 @@ const PROV_TO_CODE: Record<string, number> = {
   'legacy-accumulated': 4,
 };
 const CODE_TO_PROV = ['segmented', 'supplemented', 'derived', 'legacy', 'legacy-accumulated'];
+const CONV_TO_CODE = { premultiplied: 0, straight: 1 } as const;
+const CODE_TO_CONV = ['premultiplied', 'straight'] as const;
+
+function conventionCode(s: Sample): number {
+  if (s.kind === 'interval') return 0;
+  return CONV_TO_CODE[s.colorConvention ?? 'premultiplied'];
+}
 
 class Writer {
   private chunks: Uint8Array[] = [];
@@ -180,6 +193,7 @@ function serializeRaw(doc: Omit<DscDocument, 'compressed'>): Uint8Array {
       const li = s.layer !== undefined ? layerIndex.get(s.layer) : undefined;
       w.u8(li === undefined ? 0xff : li);
       w.u8(provenanceCode(s));
+      w.u8(conventionCode(s));
       w.string(s.id);
       if (s.kind === 'point') {
         w.f32(s.z);
@@ -242,6 +256,8 @@ function parseRaw(buf: Uint8Array): Omit<DscDocument, 'compressed'> {
       if (!kind) throw new Error(`unknown sample kind code ${kindCode}`);
       const layerIdx = r.u8();
       const provCode = r.u8();
+      const convCode = r.u8();
+      const colorConvention = CODE_TO_CONV[convCode] ?? 'premultiplied';
       const provenance = CODE_TO_PROV[provCode];
       const id = r.string();
       const layer = layerIdx === 0xff ? undefined : layers[layerIdx]?.id;
@@ -254,6 +270,7 @@ function parseRaw(buf: Uint8Array): Omit<DscDocument, 'compressed'> {
         const sample: PointSample = { kind: 'point', id, z, color };
         if (layer) sample.layer = layer;
         if (provenance) sample.provenance = provenance as PointSample['provenance'];
+        if (colorConvention !== 'premultiplied') sample.colorConvention = colorConvention;
         samples[i] = sample;
       } else if (kind === 'interval') {
         const zNear = r.f32();
@@ -277,6 +294,7 @@ function parseRaw(buf: Uint8Array): Omit<DscDocument, 'compressed'> {
           provenance: 'legacy-accumulated',
         };
         if (layer) sample.layer = layer;
+        if (colorConvention !== 'premultiplied') sample.colorConvention = colorConvention;
         samples[i] = sample;
       }
     }

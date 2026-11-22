@@ -9,6 +9,7 @@ import { composeChains } from '../src/app/compose';
 import { buildSceneChains, DEFAULT_SCENE, SCENE_LAYERS } from '../src/scene/scene';
 import { renderReferenceImage } from '../src/scene/reference';
 import { compareImages, checkEnergy } from '../src/verify/metrics';
+import { checkImageSemantics } from '../src/verify/semantics';
 import { imageToPng, type ViewMode } from './png';
 
 const USAGE = `depth-composite — command-line helper for the depth compositing canvas
@@ -20,17 +21,19 @@ Usage:
   depth-composite compose --input <file.dsc> --output <file.png> [options]
   depth-composite gen-scene --kind segmented|legacy --output <file.dsc>
   depth-composite verify --input <file.dsc> --reference scene [--json]
+  depth-composite semantics --input <file.dsc> [--json]
   depth-composite inspect --input <file.dsc>
 
 Options for compose:
   --view color|transmittance|coverage|exactness   (default color)
   --background #rrggbb                            (default #0b1020)
   --tie stable-order|exchangeable-merge           (default stable-order)
+  --color-policy convert-at-read|reject           (default convert-at-read)
   --allow-approximate-legacy                      (mark approximate previews)
   --no-compress                                   (write uncompressed DSC)
 
 Exit codes: 0 success, 1 usage/IO error, 2 compositing error (e.g. legacy
-segments need segmentation), 3 verification failed.`;
+segments need segmentation, or mixed color conventions), 3 verification failed.`;
 
 function fail(message: string, code = 1): never {
   console.error(`error: ${message}`);
@@ -68,11 +71,16 @@ async function cmdCompose(args: ReturnType<typeof parseArgs>['values']): Promise
   if (tiePolicy !== 'stable-order' && tiePolicy !== 'exchangeable-merge') {
     fail(`invalid --tie "${tiePolicy}"`);
   }
+  const colorPolicy = (args['color-policy'] as string | undefined) ?? 'convert-at-read';
+  if (colorPolicy !== 'convert-at-read' && colorPolicy !== 'reject') {
+    fail(`invalid --color-policy "${colorPolicy}"`);
+  }
   let image;
   try {
     image = composeChains(chains, width, height, {
       tiePolicy,
       allowApproximateLegacy: Boolean(args['allow-approximate-legacy']),
+      colorPolicy,
     });
   } catch (err) {
     fail((err as Error).message, 2);
@@ -174,6 +182,40 @@ async function cmdInspect(args: ReturnType<typeof parseArgs>['values']): Promise
   );
 }
 
+async function cmdSemantics(args: ReturnType<typeof parseArgs>['values']): Promise<void> {
+  const input = args.input as string | undefined;
+  if (!input) fail('semantics requires --input');
+  const { chains } = await loadChains(input);
+  const summary = checkImageSemantics(chains);
+  if (args.json) {
+    console.log(
+      JSON.stringify(
+        {
+          ok: summary.ok,
+          pixels: chains.length,
+          failedPixels: summary.pixelFailures.slice(0, 20).map((f) => ({
+            index: f.index,
+            violations: f.report.violations.map((v) => v.code),
+          })),
+          failureCount: summary.pixelFailures.length,
+        },
+        null,
+        2,
+      ),
+    );
+  } else {
+    console.log(
+      `semantics: ${summary.ok ? 'ok' : 'FAILED'} (${summary.pixelFailures.length} of ${chains.length} pixels violate the contract)`,
+    );
+    for (const f of summary.pixelFailures.slice(0, 10)) {
+      for (const v of f.report.violations) {
+        console.log(`  pixel ${f.index}: ${v.code} — ${v.message}`);
+      }
+    }
+  }
+  if (!summary.ok) fail('sample semantics check failed', 3);
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const command = argv[0];
@@ -190,6 +232,7 @@ async function main(): Promise<void> {
       view: { type: 'string' },
       background: { type: 'string' },
       tie: { type: 'string' },
+      'color-policy': { type: 'string' },
       'allow-approximate-legacy': { type: 'boolean' },
       'no-compress': { type: 'boolean' },
       json: { type: 'boolean' },
@@ -205,6 +248,9 @@ async function main(): Promise<void> {
       break;
     case 'verify':
       await cmdVerify(values);
+      break;
+    case 'semantics':
+      await cmdSemantics(values);
       break;
     case 'inspect':
       await cmdInspect(values);

@@ -1,4 +1,4 @@
-import type { Rgb, SampleChain, TiePolicy } from '../core/types';
+import type { IntegrationReport, Rgb, SampleChain, TiePolicy } from '../core/types';
 import { integrateChainDetailed } from '../core/compositor';
 
 export interface LinearImage {
@@ -8,6 +8,8 @@ export interface LinearImage {
   transmittance: Rgb[];
   exact: boolean[];
   approximate: boolean[];
+  /** Per-pixel integration report, retained for anomaly aggregation. */
+  reports: IntegrationReport[];
 }
 
 export interface PixelBudget {
@@ -32,6 +34,8 @@ export interface ComposeOptions {
   allowApproximateLegacy?: boolean;
   /** Depth tolerance forwarded to the integrator. */
   tolerance?: number;
+  /** Surface color convention policy forwarded to the integrator. */
+  colorPolicy?: 'convert-at-read' | 'reject';
 }
 
 /**
@@ -52,6 +56,7 @@ export function composeChains(
   const transmittance: Rgb[] = new Array(chains.length);
   const exact: boolean[] = new Array(chains.length);
   const approximate: boolean[] = new Array(chains.length);
+  const reports: IntegrationReport[] = new Array(chains.length);
   const every = options.progressEvery ?? Math.max(1, Math.floor(height / 20));
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -67,17 +72,19 @@ export function composeChains(
         tiePolicy: options.tiePolicy,
         allowApproximateLegacy: options.allowApproximateLegacy,
         tolerance: options.tolerance,
+        colorPolicy: options.colorPolicy,
       });
       radiance[i] = result.radiance;
       transmittance[i] = result.transmittance;
       exact[i] = result.report.exact;
       approximate[i] = !result.report.exact;
+      reports[i] = result.report;
     }
     if (options.onProgress && ((y + 1) % every === 0 || y + 1 === height)) {
       options.onProgress({ rowsDone: y + 1, rowsTotal: height });
     }
   }
-  return { width, height, radiance, transmittance, exact, approximate };
+  return { width, height, radiance, transmittance, exact, approximate, reports };
 }
 
 export function countApproximatePixels(image: LinearImage): number {

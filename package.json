@@ -9,6 +9,8 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "cli": "tsx cli/depth-composite.ts",
+    "lab": "tsx cli/sample-lab.ts",
+    "validate:samples": "tsx scripts/validate-samples.ts",
     "e2e": "playwright test"
   },
   "repository": {

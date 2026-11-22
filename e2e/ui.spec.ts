@@ -22,6 +22,46 @@ async function canvasPixel(page: Page, nx: number, ny: number): Promise<[number,
   );
 }
 
+test('runtime status banner categorizes the scene occlusion anomalies', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByTestId('composite-canvas')).toBeVisible();
+  const banner = page.getByTestId('anomaly-banner');
+  await expect(banner).toBeVisible();
+  // The generated scene places a hard slice inside the smoke spans on purpose,
+  // so non-mergeable ties and overlap splits are expected, real (not defaulted)
+  // occlusion anomalies.
+  await expect(banner).toHaveAttribute('data-has-anomaly', 'true');
+  await expect(page.getByTestId('anomaly-status')).toHaveText('runtime anomalies flagged');
+  await expect(page.getByTestId('anomaly-metrics')).toContainText('straightConverted=0');
+  await expect(page.getByTestId('anomaly-metrics')).toContainText('mixedConventionPixels=0');
+  const metrics = await page.getByTestId('anomaly-metrics').innerText();
+  expect(Number(metrics.match(/nonMergeableTies=(\d+)/)?.[1] ?? 0)).toBeGreaterThan(0);
+  const occlusion = page.getByTestId('anomaly-occlusion');
+  await expect(occlusion).toContainText('non-mergeable-tie');
+  const tieChip = occlusion.locator('[data-issue-code="non-mergeable-tie"]');
+  await expect(tieChip).toHaveText(/non-mergeable-tie×[1-9]/);
+  // No color-convention anomaly occurs for the all-premultiplied scene.
+  expect(await page.getByTestId('anomaly-color').count()).toBe(0);
+});
+
+test('runtime status banner flags legacy-approximate as an actual-color anomaly', async ({ page }) => {
+  await page.goto('/');
+  await page.getByTestId('load-legacy').click();
+  // The fatal refusal must also surface in the banner, not only the error card.
+  await expect(page.getByTestId('anomaly-banner')).toHaveAttribute('data-has-anomaly', 'true');
+  await expect(page.getByTestId('anomaly-error')).toContainText('LEGACY_NEEDS_SEGMENTATION');
+
+  // Approximate previews mark the color anomaly with the real issue code and a
+  // non-zero pixel count, never a defaulted zero.
+  await page.getByTestId('allow-approx').check();
+  await expect(page.getByTestId('anomaly-color')).toBeVisible();
+  const colorBlock = page.getByTestId('anomaly-color');
+  await expect(colorBlock).toContainText('legacy-approximate');
+  const chip = colorBlock.locator('[data-issue-code="legacy-approximate"]');
+  await expect(chip).toHaveText(/legacy-approximate×[1-9]/);
+  await expect(page.getByTestId('anomaly-status')).toHaveText('runtime anomalies flagged');
+});
+
 test('loads the segmented scene and shows an exact result', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

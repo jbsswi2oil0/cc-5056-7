@@ -22,19 +22,26 @@ a nearest-depth-per-layer or a flat 2-D stack cannot reproduce.
 
 ## Graphical entry point
 
-The primary interface is the browser canvas:
+The primary interface is the browser canvas. The terminal tools below are only
+scripting aids; start the window separately with:
 
 ```bash
 npm install
-npm run dev          # opens http://127.0.0.1:5173
+npm run dev          # then open http://127.0.0.1:5173 in a browser
 ```
+
+(Or build once with `npm run build` and serve `dist/` statically.)
 
 In the canvas you can:
 
 - **Switch depth layers** on and off (plate, smoke A, smoke B, red slice) and
   see the composited result and occlusion update.
-- **Switch views**: Color, Transmittance, Occlusion, and Exactness. Every view
-  is derived from the same computed radiance/transmittance arrays.
+- **Compose and verify volumetric occlusion and the actual color**: switch the
+  view to **Occlusion** for per-pixel blockage and **Transmittance** for the
+  per-channel light that survives every depth event, then back to **Color** for
+  the actual radiance composited over the chosen background. Click any pixel to
+  read each event's contribution and transmittance before/after, which is the
+  evidence behind both quantities.
 - **Click any pixel** to expand its ordered sample chain. The inspector lists
   every depth event with its depth, contribution, transmittance before/after,
   per-source coefficients, and `split` / `overlap split` / `merged` / `approx`
@@ -51,15 +58,30 @@ In the canvas you can:
   independent algorithm.
 
 The Result panel reports approximate-pixel count, exactness, the energy check,
-and (when enabled) the reference comparison. Anomalies — non-finite inputs,
-overlaps, coincident samples, legacy limitations — are surfaced in the UI and
-in the pixel inspector.
+and (when enabled) the reference comparison. The **runtime status banner**
+under those stats is always present and driven solely by the real per-pixel
+integration reports — it shows aggregated `nonMergeableTies`,
+`straightConverted`, and `mixedConventionPixels`, then groups every issue code
+into *volumetric occlusion* (e.g. `non-mergeable-tie`, `overlap`,
+`legacy-needs-segmentation`) or *actual color* (e.g. `straight-converted`,
+`mixed-color-convention`, `legacy-approximate`, `non-finite`). A fatal read
+error (such as `MIXED_COLOR_CONVENTION`) is shown there as well; nothing is
+masked by a defaulted zero.
 
 ## Sample semantics
 
+The maintained, executable contract lives in
+[`docs/sample-semantics.md`](docs/sample-semantics.md), including the corrected
+shared-depth ordering example, the merge contract, color conventions, and the
+middle-matte separation proof. Summary:
+
 - **Point sample** `{ kind:'point', z, color }`: `color` is premultiplied
-  linear light; `color.a` is coverage in `[0,1]`. Applied with the over
-  operator at its depth.
+  linear light by default; `color.a` is coverage in `[0,1]`. Applied with the over
+  operator at its depth. A sample may instead set
+  `colorConvention: 'straight'`, in which case the reader premultiplies it once
+  at load (or rejects it under `colorPolicy: 'reject'`). A chain that mixes
+  premultiplied and straight surface color is isolated and rejected with
+  `MIXED_COLOR_CONVENTION`, never blended.
 - **Interval sample** `{ kind:'interval', zNear, zFar, extinction, emission }`:
   a homogeneous medium. `extinction` is per-unit optical depth `σ_t`;
   `emission` is per-unit emitted radiance. Over `[zNear, zFar)` the exact
@@ -69,9 +91,15 @@ in the pixel inspector.
   an old asset that stores only the segment's total accumulated premultiplied
   color. It carries no interior distribution and no per-unit coefficients.
 
-All three use premultiplied linear RGB internally. Display and PNG export
-composite accumulated radiance over a backdrop through per-channel
-transmittance, which a single scalar alpha cannot express.
+Ordering at a shared depth is fixed as hard edge → medium near edge → medium
+far edge, because a span owns its near edge and excludes its far edge. A hard
+surface coincident with a medium is never merged into it: under stable order the
+events stay ordered and the range is reported as a `non-mergeable-tie`; under
+exchangeable merge only eligible coincident *points* are averaged.
+
+All three use premultiplied linear RGB internally after the read boundary.
+Display and PNG export composite accumulated radiance over a backdrop through
+per-channel transmittance, which a single scalar alpha cannot express.
 
 ## Exactness and the legacy asset
 
@@ -104,25 +132,67 @@ npm run cli -- compose --input out/scene-segmented.dsc --output out/color.png
 npm run cli -- compose --input out/scene-legacy.dsc --output out/legacy.png
 npm run cli -- compose --input out/scene-legacy.dsc --output out/approx.png --allow-approximate-legacy
 npm run cli -- compose --view transmittance|coverage|exactness ...
+npm run cli -- compose --color-policy convert-at-read|reject ...
 npm run cli -- verify --input out/scene-segmented.dsc --json
+npm run cli -- semantics --input out/scene-segmented.dsc --json
 npm run cli -- inspect --input out/scene-segmented.dsc
 ```
 
 `verify` compares the composited image against the independent ray-marched
-reference. Exit codes: `0` success, `1` usage/IO, `2` compositing error (e.g.
-legacy needs segmentation), `3` verification failed.
+reference. `semantics` runs the executable sample-semantics maintenance check
+(overlap splitting, non-mergeable same-depth ranges, ordering rank, split and
+shuffle invariance). Exit codes: `0` success, `1` usage/IO, `2` compositing
+error (e.g. legacy needs segmentation, or mixed color conventions), `3`
+verification or semantics failed.
+
+### Sample-lab (independent multi-layer integrator)
+
+A separate small tool generates deterministic multi-layer samples and
+integrates them without touching the canvas. Every printed value is computed
+from the generated samples — there are no hand-typed expected numbers, and a
+mean depth is never substituted for the layered data.
+
+```bash
+npm run lab -- demo                       # built-in overlap + interior-edge scene
+npm run lab -- run --interval id,zNear,zFar,sr,sg,sb,er,eg,eb \
+                     --point id,z,r,g,b,a[,straight]
+npm run lab -- matte --point ... --matte z,r,g,b
+```
+
+The demo also prints the middle-matte proof: two chains that are bit-identical
+on an empty black backdrop (`emptyDelta=0`) but separate once a rear matte is
+present (`separates=true`), exposing the transmittance term an empty backdrop
+hides.
+
+### Clean-directory validation
+
+```bash
+npm run validate:samples
+```
+
+Generates both assets into a fresh temp directory, round-trips them through the
+DSC1 container, runs the semantics and energy checks over every pixel, confirms
+the legacy refusal path, and runs the lab's middle-matte proof. It needs no
+hand-edited fixtures and exits non-zero on any violation rather than falling
+back to a default.
 
 ## File format (DSC1)
 
 `src/io/dsc.ts` defines a compact, versioned, deterministic container with
 optional gzip. It stores per-pixel sample chains (point, interval, and legacy
-kinds), layer metadata, and provenance. All-original sample kinds survive a
-round trip, so the two assets remain distinguishable on disk. See the module
-header for the byte layout.
+kinds), layer metadata, provenance, and a per-sample color-convention byte
+(premultiplied vs straight; readers default absent/zero to premultiplied).
+All-original sample kinds survive a round trip, so the two assets remain
+distinguishable on disk. See the module header for the byte layout.
 
 ## Verification
 
-- `npm test` — unit and integration tests (Vitest).
+- `npm test` — unit and integration tests (Vitest), including color-convention
+  isolation, double-layer transmittance probes, ordering/merge contracts, and
+  the middle-matte separation proof.
+- `npm run validate:samples` — clean-directory depth-sample validation entry
+  point; generates assets and runs semantics/energy checks with no hand-edited
+  data and no default-value masking.
 - `npm run e2e` — browser tests (Playwright) covering reading, composing,
   layer switching, pixel inspection, legacy refusal/preview, supplementation,
   saving, and re-reading.

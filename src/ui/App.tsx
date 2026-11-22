@@ -39,6 +39,24 @@ function layerColorMap(): Record<string, string> {
   return m;
 }
 
+// Issue codes grouped by the physical term they threaten. Occlusion anomalies
+// change how much light survives (transmittance); color anomalies change the
+// radiance actually shown. Both are derived from real per-pixel reports, never
+// from a default, so a misread sample cannot be hidden by a "no anomaly" state.
+const OCCLUSION_ANOMALIES = new Set([
+  'non-mergeable-tie',
+  'tie',
+  'large-tie-group',
+  'overlap',
+  'legacy-needs-segmentation',
+]);
+const COLOR_ANOMALIES = new Set([
+  'straight-converted',
+  'mixed-color-convention',
+  'non-finite',
+  'legacy-approximate',
+]);
+
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [state, setState] = useState<AppState>(() => makeGeneratedState('segmented'));
@@ -196,6 +214,26 @@ export function App() {
   const referenceOk = referenceDiff
     ? referenceDiff.maxRadiance < 2e-3 && referenceDiff.maxTransmittance < 2e-3
     : null;
+
+  // Anomalies that affect volumetric occlusion or the actual color, aggregated
+  // from the real per-pixel integration reports (no default-value masking).
+  const issueCounts = outcome?.issueCounts ?? {};
+  const anomalyEntries = Object.entries(issueCounts)
+    .filter(([, n]) => n > 0)
+    .sort(([a], [b]) => a.localeCompare(b));
+  const occlusionAnomalies = anomalyEntries.filter(([code]) => OCCLUSION_ANOMALIES.has(code));
+  const colorAnomalies = anomalyEntries.filter(([code]) => COLOR_ANOMALIES.has(code));
+  const otherAnomalies = anomalyEntries.filter(
+    ([code]) => !OCCLUSION_ANOMALIES.has(code) && !COLOR_ANOMALIES.has(code),
+  );
+  const hasAnomaly = anomalyEntries.length > 0 || !!outcome?.errorCode;
+
+  const anomalyClass = (code: string): string =>
+    OCCLUSION_ANOMALIES.has(code)
+      ? 'anomaly-occlusion'
+      : COLOR_ANOMALIES.has(code)
+        ? 'anomaly-color'
+        : 'anomaly-other';
 
   return (
     <div className="app">
@@ -403,6 +441,56 @@ export function App() {
               <strong className={energyOk ? 'ok' : 'bad'} data-testid="energy-check">
                 {energyOk ? 'ok' : 'failed'}
               </strong>
+            </div>
+            <div
+              className={`anomaly-banner ${hasAnomaly ? 'anomaly-banner-warn' : 'anomaly-banner-ok'}`}
+              data-testid="anomaly-banner"
+              data-has-anomaly={String(hasAnomaly)}
+            >
+              <strong data-testid="anomaly-status">
+                {hasAnomaly ? 'runtime anomalies flagged' : 'runtime status: clean'}
+              </strong>
+              <div className="anomaly-metrics muted mono" data-testid="anomaly-metrics">
+                nonMergeableTies={outcome?.nonMergeableTies ?? 0} · straightConverted=
+                {outcome?.straightConverted ?? 0} · mixedConventionPixels=
+                {outcome?.mixedConventionPixels ?? 0}
+              </div>
+              {outcome?.errorCode && (
+                <div className="anomaly-group anomaly-color" data-testid="anomaly-error">
+                  <span className="anomaly-group-label">fatal:</span>
+                  <span className="anomaly-code">{outcome.errorCode}</span>
+                </div>
+              )}
+              {occlusionAnomalies.length > 0 && (
+                <div className="anomaly-group anomaly-occlusion" data-testid="anomaly-occlusion">
+                  <span className="anomaly-group-label">volumetric occlusion:</span>
+                  {occlusionAnomalies.map(([code, n]) => (
+                    <span key={code} className="anomaly-code" data-issue-code={code}>
+                      {code}×{n}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {colorAnomalies.length > 0 && (
+                <div className="anomaly-group anomaly-color" data-testid="anomaly-color">
+                  <span className="anomaly-group-label">actual color:</span>
+                  {colorAnomalies.map(([code, n]) => (
+                    <span key={code} className="anomaly-code" data-issue-code={code}>
+                      {code}×{n}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {otherAnomalies.length > 0 && (
+                <div className="anomaly-group anomaly-other" data-testid="anomaly-other">
+                  <span className="anomaly-group-label">other:</span>
+                  {otherAnomalies.map(([code, n]) => (
+                    <span key={code} className={`anomaly-code ${anomalyClass(code)}`} data-issue-code={code}>
+                      {code}×{n}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
             {errorMessage && (
               <div className="alert" data-testid="compose-error">

@@ -68,7 +68,7 @@ export function PixelInspector(props: PixelInspectorProps) {
       </div>
 
       {result.report.issues.length > 0 && (
-        <ul className="issues">
+        <ul className="issues" data-testid="inspector-issues">
           {result.report.issues.map((issue, i) => (
             <li key={i} className={`issue issue-${issue.code}`} data-issue-code={issue.code}>
               <span className="issue-code">{issue.code}</span> {issue.message}
@@ -81,8 +81,10 @@ export function PixelInspector(props: PixelInspectorProps) {
         <button className="link" onClick={() => setExpandAll((v) => !v)}>
           {expandAll ? 'Collapse all' : 'Expand all'}
         </button>
-        <span className="muted mono">
-          {result.report.pieces} spans · {result.report.points} points · exact={String(result.report.exact)}
+        <span className="muted mono" data-testid="inspector-summary">
+          {result.report.pieces} spans · {result.report.points} points · ties={result.report.ties} ·
+          nonMergeable={result.report.nonMergeableTies} · straightConverted={result.report.straightConverted} ·
+          exact={String(result.report.exact)}
         </span>
       </div>
 

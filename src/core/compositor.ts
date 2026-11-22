@@ -282,7 +282,8 @@ export function integrateChainDetailed(
 ): IntegrationOutput {
   const tol = options.tolerance ?? DEFAULT_TOLERANCE;
   const tiePolicy: TiePolicy = options.tiePolicy ?? 'stable-order';
-  const sanitized = sanitizeChain(chain.samples ?? [], tol);
+  const colorPolicy = options.colorPolicy ?? 'convert-at-read';
+  const sanitized = sanitizeChain(chain.samples ?? [], tol, colorPolicy);
   const issues: SampleIssue[] = [...sanitized.issues];
 
   const media = [...sanitized.media];
@@ -371,6 +372,11 @@ export function integrateChainDetailed(
     if (last && Math.abs(p.z - last.z) <= tol) last.points.push(p);
     else groups.push({ z: p.z, points: [p] });
   }
+  // A hard edge that coincides with a medium span can never be merged into it:
+  // a surface and a volume are different integration kinds. The reader keeps
+  // the ordered events; only point groups that are genuinely exchangeable (and
+  // only under the merge policy) may be reduced to one event.
+  let nonMergeableTies = 0;
   for (const group of groups) {
     if (group.points.length > 1) {
       issues.push({
@@ -386,6 +392,15 @@ export function integrateChainDetailed(
           sampleIds: group.points.map((p) => p.id),
           count: group.points.length,
         });
+      } else {
+        // Stable order keeps the ordered events; the range is not merged.
+        nonMergeableTies++;
+        issues.push({
+          code: 'non-mergeable-tie',
+          message: `coincident hard edges near z=${group.z.toFixed(6)} kept as an ordered sequence, not merged`,
+          sampleIds: group.points.map((p) => p.id),
+          count: group.points.length,
+        });
       }
     }
     if (group.points.length > MAX_TIE_GROUP) {
@@ -394,6 +409,21 @@ export function integrateChainDetailed(
         message: `${group.points.length} point samples coincide near z=${group.z.toFixed(6)}; ordering is defined but the group is unusually large`,
         sampleIds: group.points.map((p) => p.id),
         count: group.points.length,
+      });
+    }
+  }
+  // A hard edge sitting on a medium near/far boundary is a cross-kind boundary
+  // that must stay split even though the depths match within tolerance.
+  for (const span of splitSpans) {
+    const onEdge = points.filter(
+      (p) => Math.abs(p.z - span.z0) <= tol || Math.abs(p.z - span.z1) <= tol,
+    );
+    if (onEdge.length > 0 && span.owners.length > 0) {
+      nonMergeableTies++;
+      issues.push({
+        code: 'non-mergeable-tie',
+        message: `hard edge at z=${span.z0.toFixed(6)} coincides with medium span [${span.z0.toFixed(6)}, ${span.z1.toFixed(6)}); kept ordered, not merged`,
+        sampleIds: [...new Set([...onEdge.map((p) => p.id), ...span.owners.map((m) => m.id)])],
       });
     }
   }
@@ -498,6 +528,9 @@ export function integrateChainDetailed(
     dropped: sanitized.dropped,
     nonFinite: sanitized.nonFinite,
     ties: groups.filter((g) => g.points.length > 1).length,
+    nonMergeableTies,
+    straightConverted: sanitized.straightConverted,
+    mixedConvention: sanitized.mixedConvention,
     issues,
     exact: !approximate,
     approximateSamples,

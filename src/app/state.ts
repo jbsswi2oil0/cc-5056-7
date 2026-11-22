@@ -44,6 +44,14 @@ export interface ComposeOutcome {
   error: string | null;
   errorCode: string | null;
   exact: boolean;
+  /** Per-issue-code counts aggregated across every pixel's integration report. */
+  issueCounts: Record<string, number>;
+  /** True when at least one pixel reported a non-mergeable same-depth range. */
+  nonMergeableTies: number;
+  /** Surface samples converted from straight color at read time. */
+  straightConverted: number;
+  /** Pixels whose chain mixed premultiplied and straight color. */
+  mixedConventionPixels: number;
 }
 
 export function layerMeta() {
@@ -154,10 +162,26 @@ export function runCompose(state: AppState, opts: ComposeRunOptions): ComposeOut
       error: (err as Error).message,
       errorCode: (err as { code?: string }).code ?? null,
       exact: false,
+      issueCounts: {},
+      nonMergeableTies: 0,
+      straightConverted: 0,
+      mixedConventionPixels: 0,
     };
   }
   const approximatePixels = countApproximatePixels(image);
   const energy = checkEnergy(image);
+  const issueCounts: Record<string, number> = {};
+  let nonMergeableTies = 0;
+  let straightConverted = 0;
+  let mixedConventionPixels = 0;
+  for (const report of image.reports) {
+    if (report.nonMergeableTies > 0) nonMergeableTies += report.nonMergeableTies;
+    if (report.straightConverted > 0) straightConverted += report.straightConverted;
+    if (report.mixedConvention) mixedConventionPixels += 1;
+    for (const issue of report.issues) {
+      issueCounts[issue.code] = (issueCounts[issue.code] ?? 0) + 1;
+    }
+  }
   let difference: ImageDifference | null = null;
   if (
     opts.referenceEnabled &&
@@ -176,6 +200,10 @@ export function runCompose(state: AppState, opts: ComposeRunOptions): ComposeOut
     error: null,
     errorCode: null,
     exact: approximatePixels === 0,
+    issueCounts,
+    nonMergeableTies,
+    straightConverted,
+    mixedConventionPixels,
   };
 }
 
@@ -190,6 +218,7 @@ function emptyImage(width: number, height: number): LinearImage {
     transmittance,
     exact: new Array(n).fill(false),
     approximate: new Array(n).fill(false),
+    reports: [],
   };
 }
 
